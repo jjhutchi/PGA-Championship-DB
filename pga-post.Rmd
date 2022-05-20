@@ -8,12 +8,20 @@ output:
       collapsed: false
       smooth_scroll: false
     code_folding: hide
+    always_allow_html: true
 ---
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(
+  fig.path = "README_figs/README-"
+)
+```
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, 
                       warning = FALSE, 
-                      message = FALSE)
+                      message = FALSE, 
+                      fig.path = "README_figs/README-")
 
 pacman::p_load(httr, jsonlite, listviewer, googlesheets4, kableExtra, dplyr, ggplot2)
 
