@@ -1,0 +1,335 @@
+---
+title: 'PGA Champtionship Pool in R'
+date: "19/05/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: false
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message = FALSE)
+
+pacman::p_load(httr, jsonlite, listviewer, googlesheets4, kableExtra, dplyr, ggplot2)
+
+print_tbl = function(data, height = "1000px") {
+  data %>%
+    kbl() %>%
+    kable_styling(full_width = T, 
+                  bootstrap_options = c("striped", "hover", "condensed", "responsive"), 
+                  fixed_thead = T) %>%
+    scroll_box(height = "500px")
+}
+theme_set(
+  theme_bw() + 
+  theme(
+    panel.grid.major = element_blank(), 
+    axis.ticks.y = element_blank(),
+    plot.title=element_text(size = 16, face="bold"),
+    plot.title.position = "plot",
+    plot.subtitle=element_text(face="italic", size=12, margin=margin(b=12)),
+    plot.caption=element_text(size=8, margin=margin(t=8), color="#7a7d7e"), 
+    legend.position = "bottom", 
+    )
+)
+```
+
+My friends and I enjoy making Major tournament fantasy pools. Over the years 
+our pools have gotten more and more involved, with us recently including 
+skins, a quad or worse penalty, and a horse race in our 2022 PGA Championship 
+contest. 
+
+The rules for the competition loosely follow the NCAA team competition format. 
+Each entrant drafts a team of 6 players, then the four lowest scores count 
+towards your end of the day score. If you're unfortunate enough not to have 
+four players make the cut to the weekend, you have to count an 80. 
+
+For those who have not heard of a horse race, a horse race usually occurs 
+after the tournament round. A group usually forms to watch one large group of 
+competitors all tee off together off the first tee. Each player completes the 
+hole, where the highest score is eliminated. The remainder play on and this 
+process repeats until there is a winner. Since we are not organizing the PGA 
+Championship, we run our horse race retroactively, tracking scores from hole 1 
+onwards, eliminating players from the pool who have the highest score, until we 
+reach a winner. With the exception of determining a winner, all players who 
+have the highest score per hole are eliminated. When each of the remaining players 
+tie for the highest score, they all continue to the next hole, until there is a 
+single winner. 
+
+I use the ESPN developer API to collect real-time scorecard data, and present a 
+dashboard of live results. This post is meant to walk others (my future self included) 
+through the process of collecting, parsing and automating the data collection, 
+then viewing the Round 1 pool results. 
+
+## Accessing the data 
+
+The API endpoint I use is: `https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard`. 
+This endpoint does not require a key, and provides scorecard data for the current 
+tournament event. 
+
+I find the `listviewer::jsonedit()` function to be helpful getting familiar with 
+how the JSON data is structured. 
+
+```{r}
+url = "https://site.api.espn.com/apis/site/v2/sports/golf/pga/scoreboard"
+res = GET(url)
+content = jsonlite::fromJSON(content(res, "text"), simplifyVector = TRUE)
+
+listviewer::jsonedit(content, height = "750px", width = "100%", mode = "view")
+```
+
+While the API is fairly general and contains much more information than we are after, 
+hole-by-hole scores are located here: `object►events►competitions►0►competitors►0►linescores►0►linescores►0►value►`
+Additionally, we can find data on the player, hole information such as the 
+par and distance, and each player's starting hole. 
+
+## Cleaning the data
+
+After exploring the JSON file using the `listviewer` library, we can move on to 
+restructuring our data into a tidy format for easy use. Specifically, I want to 
+build a data frame containing the `player`, `round`, `hole`, `par`, and `score`. 
+
+First, I select the latest competition, which we saw above to be the PGA Championship. 
+Then, we flatten the JSON file to a data frame. Once flattened, we have a data frame 
+with the hole scores nested in a list named `linescores`. Now it may be tough to 
+see, but out `linescores` list contains the round score, the hole-by-hole scores, 
+the start hole, tee time, and other information. 
+
+```{r}
+# first competition in JSON
+data = content$events$competitions[[1]]$competitors
+data = flatten(data.frame(data), recursive = TRUE)
+
+data %>%
+  select(score, athlete.displayName, linescores) %>%
+  print_tbl()
+```
+
+Lets pull the information we are after, I like to save the results to a list and 
+bind together to a data frame, but any method should work here. 
+
+
+```{r}
+
+score_data = list()
+N = nrow(data) 
+for(i in 1:N) {
+  
+  tmp = data[i, ]
+  start = tmp$linescores[[1]]$startTee[[2]]
+  player = tmp$athlete.displayName
+  scores = tmp$linescores[[1]]$linescores[[1]]
+  
+  # start hole indicators are reversed
+  if(start == 1) {
+    hole_list = c(seq(10, 18, 1), seq(1, 9, 1))[1:nrow(scores)]
+  } else {
+    hole_list = seq(1, 18, 1)[1:nrow(scores)]
+  }
+  
+  out = data.frame(player, 
+                   hole_list, 
+                   scores)
+  
+  score_data[[length(score_data) + 1]] = out
+  
+}
+score_data = do.call(rbind.data.frame, score_data)
+
+```
+
+Now we have our tidy data set, which we can reshape to make our data appear 
+more like a leaderboard. 
+
+```{r}
+score_data %>%
+  arrange(hole_list) %>%
+  tidyr::pivot_wider(id_cols = player, names_from = hole_list, values_from = value, values_fill = NULL) %>%
+  mutate(total = rowSums(select(., !contains("player")))) %>%
+  arrange(total, player) %>% 
+  print_tbl()
+```
+
+While the scores for the entire tournament are nice, we only really care about the 
+players each person in the pool drafted. I had my buddies list their picks in a 
+shared google sheet. Let's read in the data and subset our data to only include 
+players in the pool. 
+
+```{r}
+picks = read.delim(file = "picks.txt")
+
+picks %>%
+  arrange(Picked.By, player) %>%
+  print_tbl()
+  
+
+score_data = score_data %>%
+  right_join(picks, by = "player")
+
+```
+
+## Automation
+
+For mid round updates, I like to set up a `cronR` job to call a `build.R` script 
+which does the following. 
+
+1. Call the API 
+2. Clean the data
+3. Send the data to a Google Sheet which creates a dashboard. 
+
+I have found [cronR](https://cran.r-project.org/web/packages/cronR/index.html) to work extremely well allowing for automated updates every 15 minutes. 
+
+To send the data to a Google Sheet, I use the `googlesheets4::sheet_write()` function. 
+Once the data is in the Google Sheet it is just a matter of coordinating the 
+data into nice readable tables for the other participants to access. 
+
+If you're feeling lucky, you can view the [Google Sheet here](https://docs.google.com/spreadsheets/d/1RazFqjnhSs1QDmiBBShmkv2XNt2YlKHk6SOmLdg-xhY/edit?usp=sharing). A fair warning 
+that the sheet is likely broken by the time you visit the site due to the changing 
+nature of the API. 
+
+![Google Sheet Dashboard](gs-screenshot.png)
+
+## Round 1 Pool Results
+
+### Team Leaderboard
+
+First lets view the scores per team. 
+
+```{r}
+tbl_data = score_data %>%
+  arrange(hole_list) %>%
+  tidyr::pivot_wider(id_cols = c(player, Picked.By), names_from = hole_list, values_from = value, values_fill = NULL) %>%
+  mutate(score = rowSums(select(., -c("player", "Picked.By")))) %>%
+  group_by(Picked.By, player) %>%
+  arrange(score) %>%
+  ungroup
+
+tbl_data %>%
+  arrange(Picked.By, score) %>%
+  select(-Picked.By) %>%
+  kbl() %>%
+  kable_paper("striped", full_width = T) %>% 
+  pack_rows(index = table(tbl_data$Picked.By)) %>%
+  scroll_box(height = "500px")
+
+```
+
+And team totals - recall we take the four lowest scores per team. 
+
+```{r}
+score_data %>%
+  group_by(Picked.By, player) %>%
+  summarise(score = sum(value)) %>%
+  ungroup(player) %>%
+  arrange(Picked.By, score) %>%
+  mutate(order = 1:6) %>%
+  filter(order %in% 1:4) %>%
+  summarise(team_score = sum(score) - 70*4) %>%
+  arrange(team_score) %>%
+  kbl(col.names = c("Team", "Total Score")) %>%
+  kable_paper("striped", full_width = FALSE)
+
+```
+
+
+### Horse Race 
+
+Now for the fun part. Determining which players are eliminated in our retroactive 
+horse race side bet. 
+
+```{r}
+# function to determine largest score per hole. 
+# | Hole | Scores | Label (name if highest score) |
+
+# store horses in a stack
+# remove from stack if eliminated
+
+horses = unique(score_data$player)
+holes = sort(unique(score_data$hole_list))
+race = list()
+for(hole in holes) {
+  
+  tmp = score_data[score_data$hole_list == hole, ]
+  tmp = tmp[tmp$player %in% horses, ] # remove players from hole whove lost
+  
+  if(nrow(tmp) == 0){ 
+    break
+  }
+  
+  max_score = max(tmp$value)
+  eliminated = tmp[tmp$value == max_score, ]$player # get players who are eliminated
+  horses = horses[!horses %in% eliminated]
+  
+  tmp$max_score = max_score
+  tmp$eliminated = paste(eliminated, collapse = ", ")
+  
+  out = tmp
+  
+  # out = data.frame(hole = hole, 
+  #                  max_score = max_score, 
+  #                  n = length(eliminated),
+  #                  eliminated = paste(eliminated, collapse = ", "))
+  race[[length(race) + 1]] = out
+  
+}
+race = race %>% bind_rows()
+
+```
+
+The below plot lets you see which players were eliminated, as well as the scores 
+of the players who remained in the horse race. 
+
+```{r}
+p = race %>%
+  mutate(names = case_when(value == max_score ~ stringr::str_wrap(string = race$eliminated, 
+                                   width = 20, 
+                                   indent = 1,
+                                   exdent = 0), 
+                                TRUE ~ player)) %>%
+  ggplot(aes(x = hole_list, y = max_score, label = names)) + 
+  geom_jitter(aes(x = hole_list, y = value), height = 0, width = 0.1, alpha = 0.2, color = "lightblue") + 
+  geom_point(color = "darkblue", size = 2) + 
+  scale_x_continuous(breaks = 0:12) + 
+  ylim(c(1, 7)) + 
+  labs(title = "Horse Race - Round 1 Outcomes",
+       y = "", 
+       x = "")
+
+plotly::ggplotly(p, tooltip = c("names"))
+```
+
+
+```{r}
+race %>%
+  select(hole_list, max_score, eliminated) %>%
+  group_by(hole_list) %>%
+  slice(1L) %>%
+  kbl(col.names = c("Hole", "Max Score", "Eliminated Players")) %>%
+  kable_paper("striped", full_width = T)
+```
+
+### Skins 
+
+Skins are awarded when a single player makes the lowest score on a given hole. 
+
+```{r}
+score_data %>%
+  group_by(hole_list) %>%
+  mutate(min_score = min(value)) %>%
+  filter(value == min_score) %>%
+  mutate(n = n()) %>%
+  filter(n == 1) %>%
+  select(-c(n, min_score)) %>%
+  kbl(col.names = c("Player", "Hole", "Score", "Team")) %>%
+  kable_paper("striped", full_width = F)
+
+
+```
+
+Eric won a skin for Scott Scheffler's eagle on the fifth hole. 
+[See the clip on Instagram here.](https://www.instagram.com/p/CdwogKSDP1T/)
